@@ -25,8 +25,8 @@ const ParseMessage = (ev: MessageEvent) => {
 
   if (isJson) {
     const object = JSON.parse(data)
-    const key = Object.keys(object)[0]
-    const value = object[key]
+    // Optimized: use Object.entries instead of separate Object.keys and value lookup
+    const [key, value] = Object.entries(object)[0]
     return { key: key, data: value }
   }
 

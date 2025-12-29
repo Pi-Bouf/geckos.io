@@ -119,14 +119,32 @@ export class GeckosServer {
   room(roomId: Types.RoomId = undefined) {
     return {
       emit: (eventName: Types.EventName, data: Types.Data) => {
-        this.connections.forEach((connection: WebRTCConnection) => {
-          const { channel } = connection
-          const { roomId: channelRoomId } = channel
-
-          if (roomId === channelRoomId) {
-            channel.emit(eventName, data)
-          }
-        })
+        if (!roomId) {
+          // If no roomId, send to all connections
+          this.connections.forEach((connection: WebRTCConnection) => {
+            connection.channel.emit(eventName, data)
+          })
+          return
+        }
+        
+        // Use room index for faster lookup
+        const roomChannels = this.connectionsManager.getRoomChannels(roomId)
+        if (roomChannels) {
+          roomChannels.forEach((channelId: Types.ChannelId) => {
+            const connection = this.connections.get(channelId)
+            if (connection) {
+              connection.channel.emit(eventName, data)
+            }
+          })
+        } else {
+          // Fallback to iteration if room index not available
+          this.connections.forEach((connection: WebRTCConnection) => {
+            const { channel } = connection
+            if (channel.roomId === roomId) {
+              channel.emit(eventName, data)
+            }
+          })
+        }
       }
     }
   }

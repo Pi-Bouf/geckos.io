@@ -12,8 +12,9 @@ export class ClientChannel {
   private bridge: Bridge
   private connectionsManager: ConnectionsManagerClient
   private peerConnection!: PeerConnection
-  // stores all reliable messages for about 15 seconds
-  private receivedReliableMessages: { id: string; timestamp: Date; expire: number }[] = []
+  // stores all reliable message IDs for about 15 seconds
+  private receivedReliableMessages: Set<string> = new Set()
+  private receivedReliableMessagesExpiry: Map<string, number> = new Map()
   private url: string
 
   constructor(
@@ -148,23 +149,26 @@ export class ClientChannel {
       const expireTime = 15_000 // 15 seconds
 
       const deleteExpiredReliableMessages = () => {
-        const currentTime = new Date().getTime()
-        this.receivedReliableMessages.forEach((msg, index, object) => {
-          if (msg.expire <= currentTime) {
-            object.splice(index, 1)
+        const currentTime = Date.now()
+        
+        // Only cleanup periodically (every ~100 messages) to avoid overhead
+        if (this.receivedReliableMessages.size % 100 === 0) {
+          for (const [id, expire] of this.receivedReliableMessagesExpiry.entries()) {
+            if (expire <= currentTime) {
+              this.receivedReliableMessages.delete(id)
+              this.receivedReliableMessagesExpiry.delete(id)
+            }
           }
-        })
+        }
       }
 
       if (isReliableMessage) {
         deleteExpiredReliableMessages()
 
-        if (this.receivedReliableMessages.filter(obj => obj.id === data.ID).length === 0) {
-          this.receivedReliableMessages.push({
-            id: data.ID,
-            timestamp: new Date(),
-            expire: new Date().getTime() + expireTime
-          })
+        // Use Set for O(1) lookup instead of O(n) filter
+        if (!this.receivedReliableMessages.has(data.ID)) {
+          this.receivedReliableMessages.add(data.ID)
+          this.receivedReliableMessagesExpiry.set(data.ID, Date.now() + expireTime)
           callback(data.MESSAGE)
         } else {
           // reject message

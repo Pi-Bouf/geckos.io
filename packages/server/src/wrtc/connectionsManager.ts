@@ -8,8 +8,38 @@ import { makeRandomId } from '../deps.js'
 
 export default class ConnectionsManagerServer {
   connections: Map<ChannelId, WebRTCConnection> = new Map()
+  // Room index: roomId -> Set of channel IDs for O(1) room lookups
+  private rooms: Map<string, Set<ChannelId>> = new Map()
 
   constructor(public options: ServerOptions) {}
+  
+  /** Get all channel IDs in a room */
+  getRoomChannels(roomId: string | undefined): Set<ChannelId> | undefined {
+    if (!roomId) return undefined
+    return this.rooms.get(roomId)
+  }
+  
+  /** Add a channel to a room */
+  addChannelToRoom(channelId: ChannelId, roomId: string | undefined) {
+    if (!roomId) return
+    if (!this.rooms.has(roomId)) {
+      this.rooms.set(roomId, new Set())
+    }
+    this.rooms.get(roomId)!.add(channelId)
+  }
+  
+  /** Remove a channel from a room */
+  removeChannelFromRoom(channelId: ChannelId, roomId: string | undefined) {
+    if (!roomId) return
+    const roomChannels = this.rooms.get(roomId)
+    if (roomChannels) {
+      roomChannels.delete(channelId)
+      // Clean up empty rooms
+      if (roomChannels.size === 0) {
+        this.rooms.delete(roomId)
+      }
+    }
+  }
 
   private createId(): string {
     let id = makeRandomId(24)
@@ -89,7 +119,7 @@ export default class ConnectionsManagerServer {
     }
 
     // create the webrtc connection
-    const connection = new WebRTCConnection(newId, rtc_config, this.connections, userData)
+    const connection = new WebRTCConnection(newId, rtc_config, this.connections, userData, this)
     const pc = await connection.init()
 
     if (!pc) return { status: 500 }
@@ -152,6 +182,10 @@ export default class ConnectionsManagerServer {
   }
 
   async deleteConnection(connection: WebRTCConnection, state: string) {
+    // Remove channel from room index before closing
+    if (connection.channel?.roomId) {
+      this.removeChannelFromRoom(connection.id, connection.channel.roomId)
+    }
     await connection.close(state)
   }
 }

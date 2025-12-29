@@ -5,6 +5,7 @@ import { ChannelId } from '../deps.js'
 import { EVENTS } from '../deps.js'
 import EventEmitter from 'events'
 import { promiseWithTimeout } from '../deps.js'
+import ConnectionsManagerServer from './connectionsManager.js'
 
 // strangely something it takes a long time
 // so I set it to 10 seconds
@@ -22,7 +23,8 @@ export default class WebRTCConnection extends EventEmitter {
     public id: string,
     public configuration: RtcConfig,
     public connections: Map<ChannelId, WebRTCConnection>,
-    public userData: any
+    public userData: any,
+    public connectionsManager?: ConnectionsManagerServer
   ) {
     super()
 

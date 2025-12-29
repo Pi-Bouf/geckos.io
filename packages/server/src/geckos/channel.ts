@@ -1,12 +1,7 @@
-import { Types } from '../deps.js'
-import { ERRORS, EVENTS } from '../deps.js'
-import type { DataChannel } from '../wrtc/nodeDataChannel.js'
 import { Events } from '@yandeu/events'
-import { ParseMessage } from '../deps.js'
-import { SendMessage } from '../deps.js'
+import { bridge, ERRORS, EVENTS, makeReliable, ParseMessage, SendMessage, Types } from '../deps.js'
+import type { DataChannel } from '../wrtc/nodeDataChannel.js'
 import WebRTCConnection from '../wrtc/webrtcConnection.js'
-import { bridge } from '../deps.js'
-import { makeReliable } from '../deps.js'
 
 export default class ServerChannel {
   public autoManageBuffering: boolean
@@ -17,8 +12,9 @@ export default class ServerChannel {
   // private dataChannel: RTCDataChannel
 
   eventEmitter = new Events()
-  // stores all reliable messages for about 15 seconds
-  private receivedReliableMessages: { id: string; timestamp: Date; expire: number }[] = []
+  // stores all reliable message IDs for about 15 seconds
+  private receivedReliableMessages: Set<string> = new Set()
+  private receivedReliableMessagesExpiry: Map<string, number> = new Map()
 
   constructor(
     public webrtcConnection: WebRTCConnection,
@@ -91,11 +87,22 @@ export default class ServerChannel {
 
   /** Join a room by its id. */
   join(roomId: Types.RoomId) {
+    // Remove from previous room if exists
+    if (this._roomId && this.webrtcConnection.connectionsManager) {
+      this.webrtcConnection.connectionsManager.removeChannelFromRoom(this._id, this._roomId)
+    }
     this._roomId = roomId
+    // Add to new room
+    if (roomId && this.webrtcConnection.connectionsManager) {
+      this.webrtcConnection.connectionsManager.addChannelToRoom(this._id, roomId)
+    }
   }
 
   /** Leave the current room. */
   leave() {
+    if (this._roomId && this.webrtcConnection.connectionsManager) {
+      this.webrtcConnection.connectionsManager.removeChannelFromRoom(this._id, this._roomId)
+    }
     this._roomId = undefined
   }
 
@@ -108,24 +115,48 @@ export default class ServerChannel {
        * @param data The data to send.
        */
       emit: (eventName: Types.EventName, data: Types.Data, options?: Types.EmitOptions) => {
-        this.webrtcConnection.connections.forEach((connection: WebRTCConnection) => {
-          const { channel } = connection
-          const { roomId } = channel
-
-          if (roomId === this._roomId) {
-            if (options && options.reliable) {
-              makeReliable(options, (id: string) =>
-                channel.emit(eventName, {
-                  MESSAGE: data,
-                  RELIABLE: 1,
-                  ID: id
-                })
-              )
-            } else {
-              channel.emit(eventName, data)
+        if (!this._roomId || !this.webrtcConnection.connectionsManager) {
+          // Fallback to old method if room index not available
+          this.webrtcConnection.connections.forEach((connection: WebRTCConnection) => {
+            const { channel } = connection
+            if (channel.roomId === this._roomId) {
+              if (options && options.reliable) {
+                makeReliable(options, (id: string) =>
+                  channel.emit(eventName, {
+                    MESSAGE: data,
+                    RELIABLE: 1,
+                    ID: id
+                  })
+                )
+              } else {
+                channel.emit(eventName, data)
+              }
             }
-          }
-        })
+          })
+          return
+        }
+        
+        // Use room index for O(1) room lookup
+        const roomChannels = this.webrtcConnection.connectionsManager.getRoomChannels(this._roomId)
+        if (roomChannels) {
+          roomChannels.forEach((channelId: Types.ChannelId) => {
+            const connection = this.webrtcConnection.connections.get(channelId)
+            if (connection) {
+              const { channel } = connection
+              if (options && options.reliable) {
+                makeReliable(options, (id: string) =>
+                  channel.emit(eventName, {
+                    MESSAGE: data,
+                    RELIABLE: 1,
+                    ID: id
+                  })
+                )
+              } else {
+                channel.emit(eventName, data)
+              }
+            }
+          })
+        }
       }
     }
   }
@@ -139,24 +170,52 @@ export default class ServerChannel {
        * @param data The data to send.
        */
       emit: (eventName: Types.EventName, data: Types.Data, options?: Types.EmitOptions) => {
-        this.webrtcConnection.connections.forEach((connection: WebRTCConnection) => {
-          const { channel } = connection
-          const { roomId, id } = channel
+        if (!this._roomId || !this.webrtcConnection.connectionsManager) {
+          // Fallback to old method if room index not available
+          this.webrtcConnection.connections.forEach((connection: WebRTCConnection) => {
+            const { channel } = connection
+            const { roomId, id } = channel
 
-          if (roomId === this._roomId && id !== this._id) {
-            if (options && options.reliable) {
-              makeReliable(options, (id: string) =>
-                channel.emit(eventName, {
-                  MESSAGE: data,
-                  RELIABLE: 1,
-                  ID: id
-                })
-              )
-            } else {
-              channel.emit(eventName, data)
+            if (roomId === this._roomId && id !== this._id) {
+              if (options && options.reliable) {
+                makeReliable(options, (id: string) =>
+                  channel.emit(eventName, {
+                    MESSAGE: data,
+                    RELIABLE: 1,
+                    ID: id
+                  })
+                )
+              } else {
+                channel.emit(eventName, data)
+              }
             }
-          }
-        })
+          })
+          return
+        }
+        
+        // Use room index for O(1) room lookup
+        const roomChannels = this.webrtcConnection.connectionsManager.getRoomChannels(this._roomId)
+        if (roomChannels) {
+          roomChannels.forEach((channelId: Types.ChannelId) => {
+            if (channelId !== this._id) {
+              const connection = this.webrtcConnection.connections.get(channelId)
+              if (connection) {
+                const { channel } = connection
+                if (options && options.reliable) {
+                  makeReliable(options, (id: string) =>
+                    channel.emit(eventName, {
+                      MESSAGE: data,
+                      RELIABLE: 1,
+                      ID: id
+                    })
+                  )
+                } else {
+                  channel.emit(eventName, data)
+                }
+              }
+            }
+          })
+        }
       }
     }
   }
@@ -173,28 +232,58 @@ export default class ServerChannel {
        * @param data The data to send.
        */
       emit: (eventName: Types.EventName, data: Types.Data, options?: Types.EmitOptions) => {
-        this.webrtcConnection.connections.forEach((connection: WebRTCConnection) => {
-          const { channel } = connection
-          const { roomId: channelRoomId } = channel
+        if (!roomId || !this.webrtcConnection.connectionsManager) {
+          // Fallback to old method if room index not available
+          this.webrtcConnection.connections.forEach((connection: WebRTCConnection) => {
+            const { channel } = connection
+            const { roomId: channelRoomId } = channel
 
-          if (roomId === channelRoomId) {
-            if (options && options.reliable) {
-              makeReliable(options, (id: string) =>
-                channel.eventEmitter.emit(
-                  eventName,
-                  {
-                    MESSAGE: data,
-                    RELIABLE: 1,
-                    ID: id
-                  },
-                  this._id
+            if (roomId === channelRoomId) {
+              if (options && options.reliable) {
+                makeReliable(options, (id: string) =>
+                  channel.eventEmitter.emit(
+                    eventName,
+                    {
+                      MESSAGE: data,
+                      RELIABLE: 1,
+                      ID: id
+                    },
+                    this._id
+                  )
                 )
-              )
-            } else {
-              channel.eventEmitter.emit(eventName, data, this._id)
+              } else {
+                channel.eventEmitter.emit(eventName, data, this._id)
+              }
             }
-          }
-        })
+          })
+          return
+        }
+        
+        // Use room index for O(1) room lookup
+        const roomChannels = this.webrtcConnection.connectionsManager.getRoomChannels(roomId)
+        if (roomChannels) {
+          roomChannels.forEach((channelId: Types.ChannelId) => {
+            const connection = this.webrtcConnection.connections.get(channelId)
+            if (connection) {
+              const { channel } = connection
+              if (options && options.reliable) {
+                makeReliable(options, (id: string) =>
+                  channel.eventEmitter.emit(
+                    eventName,
+                    {
+                      MESSAGE: data,
+                      RELIABLE: 1,
+                      ID: id
+                    },
+                    this._id
+                  )
+                )
+              } else {
+                channel.eventEmitter.emit(eventName, data, this._id)
+              }
+            }
+          })
+        }
       }
     }
   }
@@ -279,24 +368,26 @@ export default class ServerChannel {
       const expireTime = 15_000 // 15 seconds
 
       const deleteExpiredReliableMessages = () => {
-        const currentTime = new Date().getTime()
-
-        this.receivedReliableMessages.forEach((msg, index, object) => {
-          if (msg.expire <= currentTime) {
-            object.splice(index, 1)
+        const currentTime = Date.now()
+        
+        // Only cleanup periodically (every ~100 messages) to avoid overhead
+        if (this.receivedReliableMessages.size % 100 === 0) {
+          for (const [id, expire] of this.receivedReliableMessagesExpiry.entries()) {
+            if (expire <= currentTime) {
+              this.receivedReliableMessages.delete(id)
+              this.receivedReliableMessagesExpiry.delete(id)
+            }
           }
-        })
+        }
       }
 
       if (isReliableMessage) {
         deleteExpiredReliableMessages()
 
-        if (this.receivedReliableMessages.filter(obj => obj.id === data.ID).length === 0) {
-          this.receivedReliableMessages.push({
-            id: data.ID,
-            timestamp: new Date(),
-            expire: new Date().getTime() + expireTime
-          })
+        // Use Set for O(1) lookup instead of O(n) filter
+        if (!this.receivedReliableMessages.has(data.ID)) {
+          this.receivedReliableMessages.add(data.ID)
+          this.receivedReliableMessagesExpiry.set(data.ID, Date.now() + expireTime)
           cb(data.MESSAGE, senderId)
         } else {
           // reject message
